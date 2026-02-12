@@ -63,6 +63,7 @@ Optional parameters:
 
 - `--bm25-k1`, `--bm25-b`
 - `--alpha`, `--beta` (Bayesian calibration)
+- `--dynamic` (enable per-term dynamic calibration)
 - `--cutoffs` (comma-separated list, default: 5,10,20,100)
 - `--output-json results.json`
 

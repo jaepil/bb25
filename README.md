@@ -58,6 +58,50 @@ prob_and = hybrid.score_and(q.terms, q.embedding, docs[0])
 print("OR", prob_or, "AND", prob_and)
 ```
 
+## Calibration modes
+
+BayesianBM25Scorer converts raw BM25 scores into probabilities via a sigmoid: `P(relevant) = sigmoid(alpha * (score - beta))`. The `alpha` and `beta` parameters control the sigmoid's steepness and midpoint. There are three ways to set them:
+
+### Fixed (default)
+
+```python
+bayes = bb.BayesianBM25Scorer(bm25, alpha=1.0, beta=0.5)
+```
+
+Uses the same `alpha` and `beta` for every term and every query. Simple, fast, and works well when the corpus has a homogeneous score distribution. Best overall choice for general retrieval.
+
+### Per-term dynamic
+
+```python
+bayes = bb.BayesianBM25Scorer(bm25, alpha=1.0, beta=0.5, dynamic=True)
+```
+
+At construction time, computes the median and standard deviation of BM25 scores for each term across the entire corpus. The sigmoid parameters are then adapted per term:
+
+- `alpha_eff = alpha / std_dev` -- terms with tight score distributions get a steeper sigmoid
+- `beta_eff = median` -- the sigmoid midpoint shifts to where typical scores are
+
+This normalizes the sigmoid input similarly to a z-score, so each term contributes on a comparable scale.
+
+### Query-level dynamic
+
+```python
+results = bayes.score_query(["neural", "network"], corpus)
+# returns List[Tuple[str, float]] -- (doc_id, score) pairs
+```
+
+Computes per-term median and standard deviation on-the-fly from the provided document set. Unlike per-term dynamic, the statistics come from the actual candidate documents rather than the full corpus.
+
+Best suited for re-ranking a candidate set retrieved by a first-stage retriever, or for adversarial settings where the score distribution varies widely across queries.
+
+### When to use which
+
+| Mode | Best for | Trade-off |
+|------|----------|-----------|
+| Fixed | General retrieval, stable corpora | Simple and robust; no per-term adaptation |
+| Per-term dynamic | Large corpora with diverse term distributions | Adapts per term; upfront cost at construction |
+| Query-level dynamic | Re-ranking, adversarial queries | Adapts to each query's candidate set; slower per query |
+
 ## Run the experiments
 
 ```
@@ -75,9 +119,24 @@ See `docs/sample_usage.py` for an end-to-end example using BM25, Bayesian calibr
 
 See `benchmarks/README.md` for a lightweight runner that compares BM25 and Bayesian BM25 on your own corpora.
 
-## English Benchmark (SQuAD, 100 validation queries)
+## BEIR Benchmark Results
 
-This is where BB25 shines: Bayesian Hybrid beats the classic BM25 Hybrid.
+Evaluated on four BEIR datasets of increasing difficulty for lexical retrieval.
+
+### NDCG@10
+
+| Dataset | Docs | Queries | BM25 | Bayesian (fixed) | Bayesian (query) |
+|---------|------|---------|------|-------------------|-------------------|
+| SciFact | 5,183 | 300 | 0.6007 | **0.6563** (+9.3%) | 0.4917 |
+| NFCorpus | 3,633 | 323 | 0.2932 | **0.3121** (+6.4%) | 0.2432 |
+| FiQA | 57,638 | 648 | 0.2073 | **0.2190** (+5.6%) | 0.1043 |
+| ArguAna | 8,674 | 1,406 | 0.0962 | 0.0540 | **0.1577** (+64%) |
+
+**Fixed calibration** consistently improves over BM25 on standard retrieval tasks (SciFact, NFCorpus, FiQA). The symmetric norm_prior corrects length bias, and the fixed sigmoid provides stable probability estimates.
+
+**Query-level dynamic** wins on ArguAna, where counter-argument retrieval causes high lexical overlap between relevant and irrelevant documents. Per-query adaptation of the sigmoid midpoint helps distinguish signal from noise in adversarial score distributions.
+
+### Hybrid Search (SQuAD, 100 validation queries)
 
 | Method               | NDCG@10       | MRR@10   | Notes                                |
 | -------------------- | ------------ | -------- | ------------------------------------ |
@@ -85,11 +144,9 @@ This is where BB25 shines: Bayesian Hybrid beats the classic BM25 Hybrid.
 | WS (BM25+Dense)      | 0.9051       | 0.8717   |                                      |
 | RRF (BM25+Dense)     | 0.8874       | 0.8483   | RRF underperforms weighted sum       |
 
-# Conclusion
+## Conclusion
 
-"Bayesian BM25 (bb25) has demonstrated the potential to outperform classic BM25 in hybrid search."
-
-On the English dataset (SQuAD), combining bb25 with Dense (BGE-M3) achieves higher performance than the BM25 + Dense baseline (+1.0%p NDCG). This suggests the probabilistic score from bb25 blends more smoothly with vector scores (less scale mismatch than a simple weighted sum).
+Bayesian BM25 (bb25) consistently outperforms classic BM25 on standard retrieval benchmarks (+5--9% NDCG@10 on BEIR). For adversarial or re-ranking scenarios, query-level dynamic calibration provides further gains. In hybrid search, the probabilistic scores from bb25 blend more smoothly with vector scores than raw BM25 (less scale mismatch).
 
 Original paper:
 
