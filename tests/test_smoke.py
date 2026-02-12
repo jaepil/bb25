@@ -6,7 +6,7 @@ import bb25 as bb
 class SmokeTests(unittest.TestCase):
     def test_run_experiments(self):
         results = bb.run_experiments()
-        self.assertEqual(len(results), 12)
+        self.assertEqual(len(results), 13)
         self.assertTrue(all(r.passed for r in results))
 
     def test_default_builders(self):
@@ -49,6 +49,27 @@ class SmokeTests(unittest.TestCase):
             self.assertIsInstance(doc_id, str)
             self.assertGreaterEqual(score, 0.0)
             self.assertLessEqual(score, 1.0)
+
+    def test_prior_weight(self):
+        corpus = bb.build_default_corpus()
+        bm25 = bb.BM25Scorer(corpus, 1.2, 0.75)
+
+        # prior_weight=0.0 preserves BM25 ordering
+        flat = bb.BayesianBM25Scorer(bm25, prior_weight=0.0)
+        self.assertAlmostEqual(flat.prior_weight, 0.0)
+
+        terms = ["machine", "learning"]
+        docs = corpus.documents()
+        bm25_ranking = sorted(docs, key=lambda d: -bm25.score(terms, d))
+        bayes_ranking = sorted(docs, key=lambda d: -flat.score(terms, d))
+        self.assertEqual(
+            [d.id for d in bm25_ranking],
+            [d.id for d in bayes_ranking],
+        )
+
+        # prior_weight=1.0 (default)
+        full = bb.BayesianBM25Scorer(bm25)
+        self.assertAlmostEqual(full.prior_weight, 1.0)
 
 
 if __name__ == "__main__":

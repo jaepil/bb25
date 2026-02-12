@@ -73,6 +73,7 @@ impl ExperimentRunner {
             ("10. Conjunction/Disjunction Bounds", ExperimentRunner::exp10_conjunction_disjunction),
             ("11. Dynamic Term Calibration", ExperimentRunner::exp11_dynamic_term_calibration),
             ("12. Query-level Dynamic Scoring", ExperimentRunner::exp12_query_level_dynamic),
+            ("13. Prior Weight Zero Preserves BM25 Order", ExperimentRunner::exp13_prior_weight_zero),
         ];
 
         experiments
@@ -807,6 +808,60 @@ impl ExperimentRunner {
             !has_nan_inf,
             non_match_zero,
         );
+        if !violations.is_empty() {
+            let preview = violations.into_iter().take(3).collect::<Vec<_>>().join("; ");
+            detail.push_str(", violations: ");
+            detail.push_str(&preview);
+        }
+
+        (passed, detail)
+    }
+
+    fn exp13_prior_weight_zero(&self) -> (bool, String) {
+        let flat = BayesianBM25Scorer::with_prior_weight(
+            Rc::clone(&self.bm25),
+            1.0,
+            0.5,
+            0.0,
+        );
+
+        let mut passed = true;
+        let mut queries_tested = 0usize;
+        let mut violations: Vec<String> = Vec::new();
+
+        for query in &self.queries {
+            let mut bm25_scores: Vec<(String, f64)> = self
+                .corpus
+                .documents()
+                .iter()
+                .map(|doc| (doc.id.clone(), self.bm25.score(&query.terms, doc)))
+                .collect();
+            bm25_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+            let mut bayes_scores: Vec<(String, f64)> = self
+                .corpus
+                .documents()
+                .iter()
+                .map(|doc| (doc.id.clone(), flat.score(&query.terms, doc)))
+                .collect();
+            bayes_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+            let bm25_order: Vec<&str> = bm25_scores.iter().map(|(id, _)| id.as_str()).collect();
+            let bayes_order: Vec<&str> = bayes_scores.iter().map(|(id, _)| id.as_str()).collect();
+
+            queries_tested += 1;
+            if bm25_order != bayes_order {
+                passed = false;
+                violations.push(format!(
+                    "query={}: BM25={:?} != Bayesian={:?}",
+                    query.text,
+                    &bm25_order[..5.min(bm25_order.len())],
+                    &bayes_order[..5.min(bayes_order.len())],
+                ));
+            }
+        }
+
+        let mut detail = format!("queries_tested={}, ordering_preserved={}", queries_tested, passed);
         if !violations.is_empty() {
             let preview = violations.into_iter().take(3).collect::<Vec<_>>().join("; ");
             detail.push_str(", violations: ");

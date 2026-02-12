@@ -38,7 +38,7 @@ fn main() {
 
     println!("{}", "=".repeat(72));
     if all_passed {
-        println!("All 12 experiments PASSED.");
+        println!("All 13 experiments PASSED.");
     } else {
         println!("Some experiments FAILED.");
     }

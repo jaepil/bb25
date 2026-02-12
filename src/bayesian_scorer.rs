@@ -9,6 +9,7 @@ pub struct BayesianBM25Scorer {
     bm25: Rc<BM25Scorer>,
     alpha: f64,
     beta: f64,
+    prior_weight: f64,
     term_stats: Option<HashMap<String, TermScoreStats>>,
 }
 
@@ -18,6 +19,22 @@ impl BayesianBM25Scorer {
             bm25,
             alpha,
             beta,
+            prior_weight: 1.0,
+            term_stats: None,
+        }
+    }
+
+    pub fn with_prior_weight(
+        bm25: Rc<BM25Scorer>,
+        alpha: f64,
+        beta: f64,
+        prior_weight: f64,
+    ) -> Self {
+        Self {
+            bm25,
+            alpha,
+            beta,
+            prior_weight: clamp(prior_weight, 0.0, 1.0),
             term_stats: None,
         }
     }
@@ -28,12 +45,33 @@ impl BayesianBM25Scorer {
             bm25,
             alpha,
             beta,
+            prior_weight: 1.0,
+            term_stats: Some(stats),
+        }
+    }
+
+    pub fn with_dynamic_term_stats_and_prior_weight(
+        bm25: Rc<BM25Scorer>,
+        alpha: f64,
+        beta: f64,
+        prior_weight: f64,
+    ) -> Self {
+        let stats = bm25.compute_term_stats();
+        Self {
+            bm25,
+            alpha,
+            beta,
+            prior_weight: clamp(prior_weight, 0.0, 1.0),
             term_stats: Some(stats),
         }
     }
 
     pub fn has_dynamic_term_stats(&self) -> bool {
         self.term_stats.is_some()
+    }
+
+    pub fn prior_weight(&self) -> f64 {
+        self.prior_weight
     }
 
     pub fn likelihood(&self, score: f64) -> f64 {
@@ -57,6 +95,14 @@ impl BayesianBM25Scorer {
         let p_tf = self.tf_prior(tf);
         let p_norm = self.norm_prior(doc_length, avg_doc_length);
         clamp(0.7 * p_tf + 0.3 * p_norm, 0.1, 0.9)
+    }
+
+    fn effective_prior(&self, tf: usize, doc_length: usize, avg_doc_length: f64) -> f64 {
+        if self.prior_weight == 0.0 {
+            return 0.5;
+        }
+        let composite = self.composite_prior(tf, doc_length, avg_doc_length);
+        0.5 + self.prior_weight * (composite - 0.5)
     }
 
     pub fn posterior(&self, score: f64, prior: f64) -> f64 {
@@ -99,7 +145,7 @@ impl BayesianBM25Scorer {
             return 0.0;
         }
         let tf = *doc.term_freq.get(term).unwrap_or(&0);
-        let prior = self.composite_prior(tf, doc.length, self.bm25.avgdl());
+        let prior = self.effective_prior(tf, doc.length, self.bm25.avgdl());
         let lik = self.likelihood_for_term(term, raw_score);
         self.posterior_with_likelihood(lik, prior)
     }
@@ -126,6 +172,7 @@ impl BayesianBM25Scorer {
 
     pub fn score_query(&self, query_terms: &[String], docs: &[Document]) -> Vec<f64> {
         let avgdl = self.bm25.avgdl();
+        let pw = self.prior_weight;
 
         // For each query term, compute dynamic alpha/beta from the provided docs
         let mut term_params: Vec<(String, f64, f64)> = Vec::new();
@@ -161,9 +208,15 @@ impl BayesianBM25Scorer {
                         continue;
                     }
                     let tf = *doc.term_freq.get(term.as_str()).unwrap_or(&0);
-                    let prior = self.composite_prior(tf, doc.length, avgdl);
+                    let prior = if pw == 0.0 {
+                        0.5
+                    } else {
+                        let composite = self.composite_prior(tf, doc.length, avgdl);
+                        0.5 + pw * (composite - 0.5)
+                    };
                     let lik = safe_prob(sigmoid(alpha_eff * (raw_score - beta_eff)));
-                    let posterior = lik * prior / (lik * prior + (1.0 - lik) * (1.0 - safe_prob(prior)));
+                    let prior = safe_prob(prior);
+                    let posterior = lik * prior / (lik * prior + (1.0 - lik) * (1.0 - prior));
 
                     has_match = true;
                     let p = safe_prob(posterior);

@@ -243,19 +243,23 @@ pub struct PyBayesianBM25Scorer {
 #[pymethods]
 impl PyBayesianBM25Scorer {
     #[new]
-    #[pyo3(signature = (bm25, alpha=None, beta=None, dynamic=None))]
+    #[pyo3(signature = (bm25, alpha=None, beta=None, prior_weight=None, dynamic=None))]
     fn new(
         bm25: &PyBM25Scorer,
         alpha: Option<f64>,
         beta: Option<f64>,
+        prior_weight: Option<f64>,
         dynamic: Option<bool>,
     ) -> Self {
         let a = alpha.unwrap_or(1.0);
         let b = beta.unwrap_or(0.5);
+        let pw = prior_weight.unwrap_or(1.0);
         let scorer = if dynamic.unwrap_or(false) {
-            BayesianBM25Scorer::with_dynamic_term_stats(Rc::clone(&bm25.inner), a, b)
+            BayesianBM25Scorer::with_dynamic_term_stats_and_prior_weight(
+                Rc::clone(&bm25.inner), a, b, pw,
+            )
         } else {
-            BayesianBM25Scorer::new(Rc::clone(&bm25.inner), a, b)
+            BayesianBM25Scorer::with_prior_weight(Rc::clone(&bm25.inner), a, b, pw)
         };
         Self {
             inner: Rc::new(scorer),
@@ -265,6 +269,11 @@ impl PyBayesianBM25Scorer {
     #[getter]
     fn has_dynamic_term_stats(&self) -> bool {
         self.inner.has_dynamic_term_stats()
+    }
+
+    #[getter]
+    fn prior_weight(&self) -> f64 {
+        self.inner.prior_weight()
     }
 
     fn likelihood(&self, score: f64) -> f64 {

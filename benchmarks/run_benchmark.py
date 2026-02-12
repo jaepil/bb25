@@ -271,6 +271,8 @@ def main() -> None:
     parser.add_argument("--bm25-b", type=float, default=0.75)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=0.5)
+    parser.add_argument("--prior-weight", type=float, default=1.0, help="Prior weight (0.0=flat prior, preserves BM25 order)")
+
     parser.add_argument("--cutoffs", default="5,10,20,100")
     parser.add_argument("--max-docs", type=int, default=None)
     parser.add_argument("--max-queries", type=int, default=None)
@@ -297,7 +299,7 @@ def main() -> None:
 
     corpus = build_corpus(docs)
     bm25 = bb.BM25Scorer(corpus, args.bm25_k1, args.bm25_b)
-    bayes = bb.BayesianBM25Scorer(bm25, args.alpha, args.beta, dynamic=args.dynamic)
+    bayes = bb.BayesianBM25Scorer(bm25, args.alpha, args.beta, prior_weight=args.prior_weight, dynamic=args.dynamic)
 
     tokenizer = bb.Tokenizer()
     doc_objs = corpus.documents()
