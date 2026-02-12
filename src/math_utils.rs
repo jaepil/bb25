@@ -49,3 +49,27 @@ pub fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
     }
     dot_product(a, b) / (mag_a * mag_b)
 }
+
+pub fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = sorted.len();
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    }
+}
+
+pub fn std_dev(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    let variance = values.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n;
+    variance.sqrt()
+}

@@ -198,6 +198,46 @@ def evaluate(
     return metrics
 
 
+def evaluate_batch(
+    queries: List[QueryRecord],
+    scorer: bb.BayesianBM25Scorer,
+    corpus: bb.Corpus,
+    scorer_name: str,
+    qrels: Dict[str, Dict[str, float]],
+    tokenizer: bb.Tokenizer,
+    cutoffs: List[int],
+) -> Dict[str, float]:
+    metrics = {f"map@{k}": 0.0 for k in cutoffs}
+    metrics.update({f"ndcg@{k}": 0.0 for k in cutoffs})
+    metrics.update({f"mrr@{k}": 0.0 for k in cutoffs})
+
+    counted = 0
+    start = time.perf_counter()
+    for query in queries:
+        rel_map = qrels.get(query.query_id, {})
+        if not rel_map:
+            continue
+        terms = query.terms or tokenizer.tokenize(query.text)
+        scores = scorer.score_query(terms, corpus)
+        ranked = rank_docs(scores)
+        for k in cutoffs:
+            metrics[f"map@{k}"] += average_precision_at_k(ranked, rel_map, k)
+            metrics[f"ndcg@{k}"] += ndcg_at_k(ranked, rel_map, k)
+            metrics[f"mrr@{k}"] += mrr_at_k(ranked, rel_map, k)
+        counted += 1
+
+    elapsed = time.perf_counter() - start
+    if counted == 0:
+        return {"scorer": scorer_name, "queries": 0, "elapsed_s": elapsed}
+
+    for key in list(metrics.keys()):
+        metrics[key] /= counted
+    metrics["scorer"] = scorer_name
+    metrics["queries"] = counted
+    metrics["elapsed_s"] = elapsed
+    return metrics
+
+
 def format_table(results: List[Dict[str, float]], cutoffs: List[int]) -> str:
     headers = ["scorer", "queries", "elapsed_s"]
     for k in cutoffs:
@@ -234,6 +274,7 @@ def main() -> None:
     parser.add_argument("--cutoffs", default="5,10,20,100")
     parser.add_argument("--max-docs", type=int, default=None)
     parser.add_argument("--max-queries", type=int, default=None)
+    parser.add_argument("--dynamic", action="store_true", help="Use per-term dynamic calibration")
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
@@ -256,7 +297,7 @@ def main() -> None:
 
     corpus = build_corpus(docs)
     bm25 = bb.BM25Scorer(corpus, args.bm25_k1, args.bm25_b)
-    bayes = bb.BayesianBM25Scorer(bm25, args.alpha, args.beta)
+    bayes = bb.BayesianBM25Scorer(bm25, args.alpha, args.beta, dynamic=args.dynamic)
 
     tokenizer = bb.Tokenizer()
     doc_objs = corpus.documents()
@@ -287,6 +328,17 @@ def main() -> None:
             doc_objs,
             "bayesian",
             lambda terms, doc: bayes.score(terms, doc),
+            qrels,
+            tokenizer,
+            cutoffs,
+        )
+    )
+    results.append(
+        evaluate_batch(
+            queries,
+            bayes,
+            corpus,
+            "bayesian_query",
             qrels,
             tokenizer,
             cutoffs,

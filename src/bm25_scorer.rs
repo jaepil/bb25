@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::corpus::{Corpus, Document};
+use crate::math_utils::{median, std_dev};
 
 pub struct BM25Scorer {
     corpus: Rc<Corpus>,
@@ -62,4 +64,37 @@ impl BM25Scorer {
     pub fn avgdl(&self) -> f64 {
         self.corpus.avgdl
     }
+
+    pub fn corpus(&self) -> &Corpus {
+        &self.corpus
+    }
+
+    pub fn compute_term_stats(&self) -> HashMap<String, TermScoreStats> {
+        let mut stats = HashMap::new();
+        for term in self.corpus.df.keys() {
+            let scores: Vec<f64> = self
+                .corpus
+                .documents()
+                .iter()
+                .map(|doc| self.score_term_standard(term, doc))
+                .filter(|&s| s > 0.0)
+                .collect();
+            if scores.is_empty() {
+                continue;
+            }
+            stats.insert(
+                term.clone(),
+                TermScoreStats {
+                    median: median(&scores),
+                    std_dev: std_dev(&scores),
+                },
+            );
+        }
+        stats
+    }
+}
+
+pub struct TermScoreStats {
+    pub median: f64,
+    pub std_dev: f64,
 }

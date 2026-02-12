@@ -243,14 +243,28 @@ pub struct PyBayesianBM25Scorer {
 #[pymethods]
 impl PyBayesianBM25Scorer {
     #[new]
-    fn new(bm25: &PyBM25Scorer, alpha: Option<f64>, beta: Option<f64>) -> Self {
+    #[pyo3(signature = (bm25, alpha=None, beta=None, dynamic=None))]
+    fn new(
+        bm25: &PyBM25Scorer,
+        alpha: Option<f64>,
+        beta: Option<f64>,
+        dynamic: Option<bool>,
+    ) -> Self {
+        let a = alpha.unwrap_or(1.0);
+        let b = beta.unwrap_or(0.5);
+        let scorer = if dynamic.unwrap_or(false) {
+            BayesianBM25Scorer::with_dynamic_term_stats(Rc::clone(&bm25.inner), a, b)
+        } else {
+            BayesianBM25Scorer::new(Rc::clone(&bm25.inner), a, b)
+        };
         Self {
-            inner: Rc::new(BayesianBM25Scorer::new(
-                Rc::clone(&bm25.inner),
-                alpha.unwrap_or(1.0),
-                beta.unwrap_or(0.5),
-            )),
+            inner: Rc::new(scorer),
         }
+    }
+
+    #[getter]
+    fn has_dynamic_term_stats(&self) -> bool {
+        self.inner.has_dynamic_term_stats()
     }
 
     fn likelihood(&self, score: f64) -> f64 {
@@ -279,6 +293,18 @@ impl PyBayesianBM25Scorer {
 
     fn score(&self, query_terms: Vec<String>, doc: &PyDocument) -> f64 {
         self.inner.score(&query_terms, &doc.inner)
+    }
+
+    fn score_query(&self, query_terms: Vec<String>, corpus: &PyCorpus) -> PyResult<Vec<(String, f64)>> {
+        corpus.with_corpus(|c| {
+            let docs = c.documents();
+            let scores = self.inner.score_query(&query_terms, docs);
+            Ok(docs
+                .iter()
+                .zip(scores)
+                .map(|(doc, score)| (doc.id.clone(), score))
+                .collect())
+        })
     }
 }
 

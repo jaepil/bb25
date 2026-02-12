@@ -16,16 +16,18 @@ pub use math_utils::{
     clamp,
     cosine_similarity,
     dot_product,
+    median,
     safe_log,
     safe_prob,
     sigmoid,
+    std_dev,
     vector_magnitude,
     EPSILON,
 };
 
 pub use tokenizer::Tokenizer;
 pub use corpus::{Corpus, Document};
-pub use bm25_scorer::BM25Scorer;
+pub use bm25_scorer::{BM25Scorer, TermScoreStats};
 pub use bayesian_scorer::BayesianBM25Scorer;
 pub use vector_scorer::VectorScorer;
 pub use hybrid_scorer::HybridScorer;
