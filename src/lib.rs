@@ -20,6 +20,7 @@ pub use math_utils::{
     safe_log,
     safe_prob,
     sigmoid,
+    softsign_calibrate,
     std_dev,
     vector_magnitude,
     EPSILON,

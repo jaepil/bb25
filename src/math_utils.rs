@@ -64,6 +64,18 @@ pub fn median(values: &[f64]) -> f64 {
     }
 }
 
+/// Softsign-based monotonic mapping from R to (0, 1).
+///
+/// Unlike sigmoid, softsign never saturates in f64 precision:
+/// any two distinct finite inputs produce distinct outputs.
+/// Suitable for calibrating raw scores that can span a wide range
+/// (e.g. BM25 totals of 0-100+).
+///
+/// Mapping: 0 -> 0.5, +inf -> 1.0, -inf -> 0.0.
+pub fn softsign_calibrate(x: f64) -> f64 {
+    0.5 + 0.5 * x / (1.0 + x.abs())
+}
+
 pub fn std_dev(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;

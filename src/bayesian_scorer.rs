@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::bm25_scorer::{BM25Scorer, TermScoreStats};
 use crate::corpus::Document;
-use crate::math_utils::{clamp, median, safe_log, safe_prob, sigmoid, std_dev, EPSILON};
+use crate::math_utils::{clamp, median, safe_log, safe_prob, sigmoid, softsign_calibrate, std_dev, EPSILON};
 
 pub struct BayesianBM25Scorer {
     bm25: Rc<BM25Scorer>,
@@ -151,6 +151,21 @@ impl BayesianBM25Scorer {
     }
 
     pub fn score(&self, query_terms: &[String], doc: &Document) -> f64 {
+        // When prior_weight is 0 (flat prior), apply softsign to the TOTAL
+        // BM25 score.  This is a monotonic transform of sum(term_scores),
+        // so it preserves BM25 ranking exactly while mapping to (0, 1).
+        //
+        // We use softsign instead of sigmoid because BM25 totals can range
+        // from ~-30 to ~100+. Sigmoid saturates to 1.0 in f64 when the
+        // input exceeds ~36, losing ranking information. Softsign never
+        // saturates: any two distinct inputs produce distinct outputs.
+        if self.prior_weight == 0.0 {
+            let total = self.bm25.score(query_terms, doc);
+            return softsign_calibrate(total);
+        }
+
+        // Full Bayesian path: per-term posterior with document prior,
+        // combined via probabilistic OR (log-odds conjunction).
         let mut log_complement_sum = 0.0;
         let mut has_match = false;
 
@@ -174,7 +189,34 @@ impl BayesianBM25Scorer {
         let avgdl = self.bm25.avgdl();
         let pw = self.prior_weight;
 
-        // For each query term, compute dynamic alpha/beta from the provided docs
+        // When prior_weight is 0, use query-level dynamic calibration on
+        // the TOTAL BM25 score (preserves BM25 ranking).
+        if pw == 0.0 {
+            let totals: Vec<f64> = docs
+                .iter()
+                .map(|doc| self.bm25.score(query_terms, doc))
+                .collect();
+
+            let positive: Vec<f64> = totals.iter().copied().filter(|&s| s > 0.0).collect();
+            let (alpha_eff, beta_eff) = if positive.len() < 2 {
+                (self.alpha, self.beta)
+            } else {
+                let med = median(&positive);
+                let sd = std_dev(&positive);
+                if sd < EPSILON {
+                    (self.alpha, med)
+                } else {
+                    (self.alpha / sd, med)
+                }
+            };
+
+            return totals
+                .iter()
+                .map(|&total| sigmoid(alpha_eff * (total - beta_eff)))
+                .collect();
+        }
+
+        // Full Bayesian path: per-term dynamic calibration with priors.
         let mut term_params: Vec<(String, f64, f64)> = Vec::new();
         for term in query_terms {
             let scores: Vec<f64> = docs
@@ -208,12 +250,8 @@ impl BayesianBM25Scorer {
                         continue;
                     }
                     let tf = *doc.term_freq.get(term.as_str()).unwrap_or(&0);
-                    let prior = if pw == 0.0 {
-                        0.5
-                    } else {
-                        let composite = self.composite_prior(tf, doc.length, avgdl);
-                        0.5 + pw * (composite - 0.5)
-                    };
+                    let composite = self.composite_prior(tf, doc.length, avgdl);
+                    let prior = 0.5 + pw * (composite - 0.5);
                     let lik = safe_prob(sigmoid(alpha_eff * (raw_score - beta_eff)));
                     let prior = safe_prob(prior);
                     let posterior = lik * prior / (lik * prior + (1.0 - lik) * (1.0 - prior));

@@ -91,7 +91,10 @@ def load_qrels(path: Path) -> Dict[str, Dict[str, float]]:
             if len(parts) < 3:
                 continue
             qid, did, rel_str = parts[0], parts[1], parts[2]
-            rel = float(rel_str)
+            try:
+                rel = float(rel_str)
+            except ValueError:
+                continue
             qrels.setdefault(qid, {})[did] = rel
     return qrels
 
@@ -300,6 +303,7 @@ def main() -> None:
     corpus = build_corpus(docs)
     bm25 = bb.BM25Scorer(corpus, args.bm25_k1, args.bm25_b)
     bayes = bb.BayesianBM25Scorer(bm25, args.alpha, args.beta, prior_weight=args.prior_weight, dynamic=args.dynamic)
+    bayes_flat = bb.BayesianBM25Scorer(bm25, args.alpha, args.beta, prior_weight=0.0)
 
     tokenizer = bb.Tokenizer()
     doc_objs = corpus.documents()
@@ -319,6 +323,17 @@ def main() -> None:
             doc_objs,
             "bm25",
             lambda terms, doc: bm25.score(terms, doc),
+            qrels,
+            tokenizer,
+            cutoffs,
+        )
+    )
+    results.append(
+        evaluate(
+            queries,
+            doc_objs,
+            "bayesian_flat",
+            lambda terms, doc: bayes_flat.score(terms, doc),
             qrels,
             tokenizer,
             cutoffs,
