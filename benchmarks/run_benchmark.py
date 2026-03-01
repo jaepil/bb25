@@ -7,7 +7,7 @@ import argparse
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -18,15 +18,15 @@ import bb25 as bb
 class DocRecord:
     doc_id: str
     text: str
-    embedding: List[float]
+    embedding: List[float] = field(default_factory=list)
 
 
 @dataclass
 class QueryRecord:
     query_id: str
     text: str
-    terms: Optional[List[str]]
-    embedding: Optional[List[float]]
+    terms: Optional[List[str]] = None
+    embedding: Optional[List[float]] = None
 
 
 def load_jsonl(path: Path) -> Iterable[dict]:
@@ -107,6 +107,30 @@ def parse_cutoffs(raw: str) -> List[int]:
     items = [int(x.strip()) for x in raw.split(",") if x.strip()]
     unique = sorted(set([x for x in items if x > 0]))
     return unique
+
+
+def encode_embeddings(
+    docs: List[DocRecord],
+    queries: List[QueryRecord],
+    model_name: str,
+    batch_size: int,
+) -> None:
+    from sentence_transformers import SentenceTransformer
+
+    print(f"Loading embedding model: {model_name}")
+    model = SentenceTransformer(model_name)
+
+    doc_texts = [doc.text for doc in docs]
+    print(f"Encoding {len(doc_texts)} documents...")
+    doc_embs = model.encode(doc_texts, batch_size=batch_size, show_progress_bar=True)
+    for i, doc in enumerate(docs):
+        doc.embedding = doc_embs[i].tolist()
+
+    query_texts = [q.text for q in queries]
+    print(f"Encoding {len(query_texts)} queries...")
+    query_embs = model.encode(query_texts, batch_size=batch_size, show_progress_bar=True)
+    for i, q in enumerate(queries):
+        q.embedding = query_embs[i].tolist()
 
 
 def build_corpus(docs: List[DocRecord]) -> bb.Corpus:
@@ -205,6 +229,97 @@ def evaluate(
     return metrics
 
 
+def evaluate_hybrid(
+    queries: List[QueryRecord],
+    docs: List[bb.Document],
+    scorer_name: str,
+    score_fn,
+    qrels: Dict[str, Dict[str, float]],
+    tokenizer: bb.Tokenizer,
+    cutoffs: List[int],
+) -> Dict[str, float]:
+    metrics = {f"map@{k}": 0.0 for k in cutoffs}
+    metrics.update({f"ndcg@{k}": 0.0 for k in cutoffs})
+    metrics.update({f"mrr@{k}": 0.0 for k in cutoffs})
+
+    counted = 0
+    start = time.perf_counter()
+    for query in queries:
+        rel_map = qrels.get(query.query_id, {})
+        if not rel_map:
+            continue
+        if query.embedding is None:
+            continue
+        terms = query.terms or tokenizer.tokenize(query.text)
+        scores = [(doc.id, score_fn(terms, query.embedding, doc)) for doc in docs]
+        ranked = rank_docs(scores)
+        for k in cutoffs:
+            metrics[f"map@{k}"] += average_precision_at_k(ranked, rel_map, k)
+            metrics[f"ndcg@{k}"] += ndcg_at_k(ranked, rel_map, k)
+            metrics[f"mrr@{k}"] += mrr_at_k(ranked, rel_map, k)
+        counted += 1
+
+    elapsed = time.perf_counter() - start
+    if counted == 0:
+        return {"scorer": scorer_name, "queries": 0, "elapsed_s": elapsed}
+
+    for key in list(metrics.keys()):
+        metrics[key] /= counted
+    metrics["scorer"] = scorer_name
+    metrics["queries"] = counted
+    metrics["elapsed_s"] = elapsed
+    return metrics
+
+
+def evaluate_balanced_fusion(
+    queries: List[QueryRecord],
+    docs: List[bb.Document],
+    bayes: bb.BayesianBM25Scorer,
+    vector: bb.VectorScorer,
+    qrels: Dict[str, Dict[str, float]],
+    tokenizer: bb.Tokenizer,
+    cutoffs: List[int],
+    weight: float = 0.5,
+) -> Dict[str, float]:
+    metrics = {f"map@{k}": 0.0 for k in cutoffs}
+    metrics.update({f"ndcg@{k}": 0.0 for k in cutoffs})
+    metrics.update({f"mrr@{k}": 0.0 for k in cutoffs})
+
+    doc_ids = [doc.id for doc in docs]
+    counted = 0
+    start = time.perf_counter()
+    for query in queries:
+        rel_map = qrels.get(query.query_id, {})
+        if not rel_map:
+            continue
+        if query.embedding is None:
+            continue
+        terms = query.terms or tokenizer.tokenize(query.text)
+
+        sparse_probs = [bayes.score(terms, doc) for doc in docs]
+        dense_sims = [vector.score(query.embedding, doc) for doc in docs]
+        fused = bb.balanced_log_odds_fusion(sparse_probs, dense_sims, weight)
+
+        scores = list(zip(doc_ids, fused))
+        ranked = rank_docs(scores)
+        for k in cutoffs:
+            metrics[f"map@{k}"] += average_precision_at_k(ranked, rel_map, k)
+            metrics[f"ndcg@{k}"] += ndcg_at_k(ranked, rel_map, k)
+            metrics[f"mrr@{k}"] += mrr_at_k(ranked, rel_map, k)
+        counted += 1
+
+    elapsed = time.perf_counter() - start
+    if counted == 0:
+        return {"scorer": "balanced_fusion", "queries": 0, "elapsed_s": elapsed}
+
+    for key in list(metrics.keys()):
+        metrics[key] /= counted
+    metrics["scorer"] = "balanced_fusion"
+    metrics["queries"] = counted
+    metrics["elapsed_s"] = elapsed
+    return metrics
+
+
 def format_table(results: List[Dict[str, float]], cutoffs: List[int]) -> str:
     headers = ["scorer", "queries", "elapsed_s"]
     for k in cutoffs:
@@ -234,6 +349,9 @@ def main() -> None:
     parser.add_argument("--query-text", default="text")
     parser.add_argument("--query-terms", default=None)
     parser.add_argument("--query-embedding", default=None)
+    parser.add_argument("--embedding-model", default=None,
+                        help="sentence-transformers model name (e.g. all-MiniLM-L6-v2)")
+    parser.add_argument("--embedding-batch-size", type=int, default=64)
     parser.add_argument("--bm25-k1", type=float, default=1.2)
     parser.add_argument("--bm25-b", type=float, default=0.75)
     parser.add_argument("--alpha", type=float, default=1.0)
@@ -258,6 +376,9 @@ def main() -> None:
     )
     if args.max_queries:
         queries = queries[: args.max_queries]
+
+    if args.embedding_model:
+        encode_embeddings(docs, queries, args.embedding_model, args.embedding_batch_size)
 
     qrels = load_qrels(args.qrels)
 
@@ -301,43 +422,22 @@ def main() -> None:
     )
 
     if has_embeddings:
-        query_embedding_map = {}
-        for q in queries:
-            if q.embedding:
-                query_embedding_map[q.query_id] = q.embedding
-
-        def make_hybrid_fn(scorer_method):
-            def fn(terms, doc):
-                qid = None
-                for q in queries:
-                    q_terms = q.terms or tokenizer.tokenize(q.text)
-                    if q_terms == list(terms):
-                        qid = q.query_id
-                        break
-                emb = query_embedding_map.get(qid, [0.0] * len(doc.embedding))
-                return scorer_method(terms, emb, doc)
-            return fn
-
         results.append(
-            evaluate(
-                queries,
-                doc_objs,
-                "hybrid_or",
-                make_hybrid_fn(hybrid_or.score_or),
-                qrels,
-                tokenizer,
-                cutoffs,
+            evaluate_hybrid(
+                queries, doc_objs, "hybrid_or",
+                hybrid_or.score_or, qrels, tokenizer, cutoffs,
             )
         )
         results.append(
-            evaluate(
-                queries,
-                doc_objs,
-                "hybrid_and",
-                make_hybrid_fn(hybrid_and.score_and),
-                qrels,
-                tokenizer,
-                cutoffs,
+            evaluate_hybrid(
+                queries, doc_objs, "hybrid_and",
+                hybrid_and.score_and, qrels, tokenizer, cutoffs,
+            )
+        )
+        results.append(
+            evaluate_balanced_fusion(
+                queries, doc_objs, bayes, vector,
+                qrels, tokenizer, cutoffs,
             )
         )
 
